@@ -2277,8 +2277,30 @@ export class BackgroundTaskRegistry {
   }
 
   private handleTerminalPublishFailure(task: BgTask, error: unknown): void {
-    this.logger.error(`[background-tasks] terminal publication failed for ${task.id}:`, error);
     task.terminalPublishInFlight = false;
+    // A closed EventBus is unrecoverable: no consumer can ever receive this
+    // snapshot, so every retry is guaranteed to fail the same way. The retry
+    // below is only gated on `!task.terminalPublished`, which never becomes
+    // true because `publishTerminal` throws before it is set -- so retrying a
+    // closed bus is an unbounded 100ms log loop that outlives the session
+    // (`unref()` keeps it from holding the process open at exit, but the pi
+    // process is long-lived). Log once and stop, mirroring the `shuttingDown`
+    // short-circuit `notifyCompletion` already has. `terminalPublished` is the
+    // flag every publish path checks, so setting it here is what actually ends
+    // the loop: it means "no further attempts", not "delivered".
+    const message = error instanceof Error ? error.message : String(error);
+    if (this.shuttingDown || message.includes('EventBus service is closed')) {
+      this.logger.error(
+        `[background-tasks] terminal publication abandoned for ${task.id} (event bus closed); not retrying.`,
+      );
+      task.terminalPublished = true;
+      if (task.terminalPublishRetryHandle) {
+        clearTimeout(task.terminalPublishRetryHandle);
+        task.terminalPublishRetryHandle = undefined;
+      }
+      return;
+    }
+    this.logger.error(`[background-tasks] terminal publication failed for ${task.id}:`, error);
     if (!task.terminalPublished && task.terminalPublishRetryHandle === undefined) {
       task.terminalPublishRetryHandle = setTimeout(() => {
         task.terminalPublishRetryHandle = undefined;

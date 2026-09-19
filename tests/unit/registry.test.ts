@@ -987,6 +987,60 @@ void describe('BackgroundTaskRegistry', () => {
     }
   });
 
+  void it('stops retrying terminal publication once the EventBus is closed', async () => {
+    let attempts = 0;
+    const h = await createHarness({
+      publishTerminal: () => {
+        attempts += 1;
+        throw new Error('pi-background-tasks EventBus service is closed');
+      },
+    });
+    try {
+      const { task, child } = await startFakeTask(h, 'Terminal Bus Closed');
+      child.close(0, null);
+      await waitFor(() => task.status === 'completed', 'closed-bus task completion');
+      await waitFor(
+        () => h.errors.flat().join(' ').includes('terminal publication abandoned'),
+        'closed-bus abandonment log',
+      );
+      // A closed bus can never accept the snapshot, so the failure must not be
+      // rescheduled: the retry interval is 100ms, and anything that re-arms
+      // here floods the terminal for the life of the process.
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      assert.equal(attempts, 1);
+      assert.equal(task.terminalPublished, true);
+      assert.equal(task.terminalPublishRetryHandle, undefined);
+      assert.equal(task.terminalPublishInFlight, false);
+    } finally {
+      await cleanup(h.root);
+    }
+  });
+
+  void it('stops retrying terminal publication while shutting down', async () => {
+    let attempts = 0;
+    const h = await createHarness({
+      publishTerminal: () => {
+        attempts += 1;
+        throw new Error('terminal bus unavailable');
+      },
+    });
+    try {
+      const { task, child } = await startFakeTask(h, 'Terminal Shutdown');
+      h.registry.setShuttingDown(true);
+      child.close(0, null);
+      await waitFor(() => task.status === 'completed', 'shutdown task completion');
+      await waitFor(
+        () => h.errors.flat().join(' ').includes('terminal publication abandoned'),
+        'shutdown abandonment log',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      assert.equal(attempts, 1);
+      assert.equal(task.terminalPublishRetryHandle, undefined);
+    } finally {
+      await cleanup(h.root);
+    }
+  });
+
   void it('resets notified when completion notification delivery fails and records loud metadata errors', async () => {
     const failingNotify = await createHarness({
       sendCompletionNotification: () => {
